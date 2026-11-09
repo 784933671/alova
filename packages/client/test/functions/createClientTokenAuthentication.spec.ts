@@ -442,6 +442,51 @@ describe('createClientTokenAuthentication', () => {
     expect(redirectLoginFn).toHaveBeenCalledTimes(1);
     expect(waitingList).toHaveLength(0); // An error is thrown in Refresh token.handler and the waiting list will also be cleared.
   });
+  test('should reject every waiting request when the client refresh fails', async () => {
+    let rejectRefresh!: (reason: unknown) => void;
+    const refreshError = new Error('refresh token unavailable');
+    const refreshResult = new Promise<void>((_, reject) => {
+      rejectRefresh = reject;
+    });
+    const refreshTokenFn = vi.fn(() => refreshResult);
+    const beforeRequestFn = vi.fn();
+    const { onAuthRequired, onResponseRefreshToken, waitingList } = createClientTokenAuthentication<
+      VueHookType,
+      MockRequestAdapter
+    >({
+      refreshToken: {
+        isExpired: () => true,
+        handler: refreshTokenFn
+      }
+    });
+    const alovaInst = createAlova({
+      statesHook: VueHook,
+      requestAdapter: mockRequestAdapter,
+      cacheFor: null,
+      beforeRequest: onAuthRequired(beforeRequestFn),
+      responded: onResponseRefreshToken()
+    });
+    const first = alovaInst.Get('/list-auth?request=1').send();
+    await vi.waitFor(() => expect(refreshTokenFn).toHaveBeenCalledTimes(1));
+    const second = alovaInst.Get('/list-auth?request=2').send();
+    const third = alovaInst.Get('/list-auth?request=3').send();
+    const results = Promise.allSettled([first, second, third]);
+    await vi.waitFor(() => expect(waitingList).toHaveLength(2));
+    rejectRefresh(refreshError);
+
+    const failures = await results;
+    expect(failures).toStrictEqual([
+      { status: 'rejected', reason: refreshError },
+      { status: 'rejected', reason: refreshError },
+      { status: 'rejected', reason: refreshError }
+    ]);
+    for (const result of failures) {
+      expect(result.status === 'rejected' && result.reason).toBe(refreshError);
+    }
+    expect(refreshTokenFn).toHaveBeenCalledTimes(1);
+    expect(beforeRequestFn).not.toHaveBeenCalled();
+    expect(waitingList).toHaveLength(0);
+  });
   test('should emit bypass the token validation when set authRole to null', async () => {
     let token = '';
     const expireFn = vi.fn();

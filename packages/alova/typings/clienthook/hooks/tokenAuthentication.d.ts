@@ -98,6 +98,7 @@ export interface TokenAuthenticationResult<SH extends StatesHook<any>, RA extend
   waitingList: {
     method: Method<StateHookAdapter2AG<SH, RA>>;
     resolve: () => void;
+    reject: (reason?: unknown) => void;
   }[];
 }
 

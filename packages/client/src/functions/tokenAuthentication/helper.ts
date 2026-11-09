@@ -37,6 +37,7 @@ export type PosibbleAuthMap =
 export type WaitingRequestList = {
   method: Method;
   resolve: () => void;
+  reject: (reason?: unknown) => void;
 }[];
 
 export const defaultVisitorMeta = {
@@ -65,10 +66,11 @@ export const checkMethodRole = ({ meta }: Method, metaMatches: MetaMatches) => {
   return falseValue;
 };
 export const waitForTokenRefreshed = (method: Method, waitingList: WaitingRequestList) =>
-  newInstance(PromiseCls, resolve => {
+  newInstance(PromiseCls, (resolve, reject) => {
     pushItem(waitingList, {
       method,
-      resolve
+      resolve,
+      reject
     });
   });
 export const callHandlerIfMatchesMeta = (
@@ -117,7 +119,12 @@ export const refreshTokenIfExpired = async (
       if (intentToRefreshToken) {
         updateRefreshStatus(trueValue);
         // Call refresh token
-        await refreshToken?.handler(...handlerParams);
+        try {
+          await refreshToken?.handler(...handlerParams);
+        } catch (error) {
+          forEach(waitingList, ({ reject }) => reject(error));
+          throw error;
+        }
         updateRefreshStatus(falseValue);
         // After the token refresh is completed, the requests in the waiting list are notified.
         forEach(waitingList, ({ resolve }) => resolve());
