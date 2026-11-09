@@ -552,6 +552,79 @@ describe('createServerTokenAuthentication', () => {
     expect(redirectLoginFn).toHaveBeenCalledTimes(1);
     expect(waitingList).toHaveLength(0); // An error is thrown in Refresh token.handler and the waiting list will also be cleared.
   });
+  test.each(['refreshTokenOnSuccess', 'refreshTokenOnError'] as const)(
+    'should reject every waiting request when %s fails and allow another refresh',
+    async refreshEvent => {
+      let token = '';
+      let failRefresh = true;
+      let rejectRefresh!: (reason: unknown) => void;
+      const refreshError = new Error('refresh token unavailable');
+      const refreshResult = new Promise<void>((_, reject) => {
+        rejectRefresh = reject;
+      });
+      const refreshTokenFn = vi.fn(async () => {
+        if (failRefresh) {
+          await refreshResult;
+        }
+        token = '123';
+      });
+      const beforeRequestFn = vi.fn();
+      const { onAuthRequired, onResponseRefreshToken, waitingList } = createServerTokenAuthentication<
+        VueHookType,
+        MockRequestAdapter
+      >({
+        [refreshEvent]: {
+          isExpired: (response: { status?: number; name?: string }) =>
+            response.status === 401 || response.name === '401',
+          handler: refreshTokenFn
+        },
+        assignToken: method => {
+          method.config.headers.Authorization = token;
+        }
+      });
+      const alovaInst = createAlova({
+        statesHook: VueHook,
+        requestAdapter: mockRequestAdapter,
+        cacheFor: null,
+        beforeRequest: onAuthRequired(beforeRequestFn),
+        responded: onResponseRefreshToken()
+      });
+      const request = (id: number) =>
+        alovaInst
+          .Get<number[]>(refreshEvent === 'refreshTokenOnSuccess' ? '/list-auth?notError=1' : '/list-auth', {
+            params: { id }
+          })
+          .send();
+
+      const first = request(1);
+      const second = request(2);
+      await vi.waitFor(() => expect(waitingList).toHaveLength(1));
+      const third = request(3);
+      const results = Promise.allSettled([first, second, third]);
+      await vi.waitFor(() => expect(waitingList).toHaveLength(2));
+      expect(beforeRequestFn).toHaveBeenCalledTimes(2);
+      rejectRefresh(refreshError);
+
+      const failures = await results;
+      expect(failures).toStrictEqual([
+        { status: 'rejected', reason: refreshError },
+        { status: 'rejected', reason: refreshError },
+        { status: 'rejected', reason: refreshError }
+      ]);
+      for (const result of failures) {
+        expect(result.status === 'rejected' && result.reason).toBe(refreshError);
+      }
+      expect(refreshTokenFn).toHaveBeenCalledTimes(1);
+      expect(beforeRequestFn).toHaveBeenCalledTimes(2);
+      expect(waitingList).toHaveLength(0);
+
+      failRefresh = false;
+      expect(await request(4)).toStrictEqual(generateContinuousNumbers(5));
+      expect(refreshTokenFn).toHaveBeenCalledTimes(2);
+      expect(beforeRequestFn).toHaveBeenCalledTimes(4);
+      expect(waitingList).toHaveLength(0);
+    }
+  );
   test('should emit bypass the token validation when set authRole to null', async () => {
     let token = '';
     const expireFn = vi.fn();
