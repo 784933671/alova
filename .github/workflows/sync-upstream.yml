@@ -85,7 +85,15 @@ jobs:
           pnpm --filter @alova/shared run build
           pnpm --filter alova run build
 
-      - name: Pack snapshot
+      - name: Verify token refresh patch
+        run: |
+          pnpm --filter @alova/mock run build
+          pnpm --filter @alova/adapter-xhr run build
+          pnpm exec vitest run \
+            packages/client/test/functions/createClientTokenAuthentication.spec.ts \
+            packages/client/test/functions/createServerTokenAuthentication.spec.ts
+
+      - name: Pack patched alova
         env:
           SOURCE_SHA: ${{ needs.sync.outputs.sha }}
         shell: bash
@@ -94,25 +102,14 @@ jobs:
           package_dir="$RUNNER_TEMP/npm-packages"
           mkdir -p "$package_dir"
 
-          # 打包时让 alova 依赖同一提交的 shared 快照。
-          for package in shared alova; do
-            manifest="packages/$package/package.json"
-            jq --arg sha "$SOURCE_SHA" '
-              del(.publishConfig) |
-              .version |= (split("+")[0] |
-                if contains("-") then . + ".upstream.g" + $sha
-                else . + "-upstream.g" + $sha end)
-            ' "$manifest" > "$RUNNER_TEMP/package.json"
-            mv "$RUNNER_TEMP/package.json" "$manifest"
-          done
-
-          for package in shared alova; do
-            pnpm --dir "packages/$package" pack --out "$package_dir/$package.tgz"
-          done
+          node scripts/prepare-cm-package.mjs "$SOURCE_SHA"
+          pnpm --dir packages/alova pack --out "$package_dir/alova-patched.tgz"
 
           shared_version=$(jq -er '.version' packages/shared/package.json)
-          tar -xOzf "$package_dir/alova.tgz" package/package.json |
-            jq -e --arg version "$shared_version" '.dependencies["@alova/shared"] == $version' > /dev/null
+          tar -xOzf "$package_dir/alova-patched.tgz" package/package.json |
+            jq -e --arg version "$shared_version" '
+              .name == "@cm/alova-patched" and .dependencies["@alova/shared"] == $version
+            ' > /dev/null
 
       - uses: actions/upload-artifact@v4
         with:
@@ -150,25 +147,22 @@ jobs:
           set -euo pipefail
           : "${NODE_AUTH_TOKEN:?请在 GitHub Actions Secrets 中配置 NPM_TOKEN}"
 
-          for package in shared alova; do
-            tarball="$RUNNER_TEMP/npm-packages/$package.tgz"
-            name=alova
-            if [[ "$package" == shared ]]; then
-              name=@alova/shared
-            fi
-            spec=$(tar -xOzf "$tarball" package/package.json |
-              jq -er --arg name "$name" 'select(.name == $name and .publishConfig == null) | .name + "@" + .version')
+          tarball="$RUNNER_TEMP/npm-packages/alova-patched.tgz"
+          manifest=$(tar -xOzf "$tarball" package/package.json)
+          spec=$(jq -er 'select(.name == "@cm/alova-patched" and .publishConfig == null) | .name + "@" + .version' <<< "$manifest")
 
-            # 仅将 404 视为缺少该版本，避免掩盖鉴权或网络错误。
-            if result=$(npm view "$spec" version --json --prefer-online --registry "$NPM_REGISTRY" 2> "$RUNNER_TEMP/npm-view.log"); then
-              printf '%s 已发布，跳过。\n' "$spec"
-              continue
-            fi
-            if ! jq -e '.error.code == "E404"' <<< "$result" > /dev/null; then
-              cat "$RUNNER_TEMP/npm-view.log" >&2
-              exit 1
-            fi
+          # 仅将 404 视为缺少该版本，避免掩盖鉴权或网络错误。
+          if result=$(npm view "$spec" version --json --prefer-online --registry "$NPM_REGISTRY" 2> "$RUNNER_TEMP/npm-view.log"); then
+            printf '%s 已发布，跳过。\n' "$spec"
+            exit 0
+          fi
+          if ! jq -e '.error.code == "E404"' <<< "$result" > /dev/null; then
+            cat "$RUNNER_TEMP/npm-view.log" >&2
+            exit 1
+          fi
 
-            npm publish "$tarball" --registry "$NPM_REGISTRY" --tag upstream --ignore-scripts
-            printf '已发布 `%s`，标签为 `upstream`。\n\n' "$spec" >> "$GITHUB_STEP_SUMMARY"
-          done
+          shared_version=$(jq -er '.dependencies["@alova/shared"]' <<< "$manifest")
+          npm view "@alova/shared@$shared_version" version --json --registry "$NPM_REGISTRY" > /dev/null
+          npm publish "$tarball" --registry "$NPM_REGISTRY" --tag cm --access restricted --ignore-scripts
+          npm view "$spec" version --json --prefer-online --registry "$NPM_REGISTRY"
+          printf '已发布 `%s`，标签为 `cm`。\n\n' "$spec" >> "$GITHUB_STEP_SUMMARY"
