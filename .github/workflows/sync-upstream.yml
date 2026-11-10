@@ -1,0 +1,35 @@
+name: Sync upstream main
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == '784933671/alova'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Merge upstream main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 原生合并接口保留本仓库提交，冲突时返回失败。
+          if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
+            -f branch=main > "$RUNNER_TEMP/sync-result.json"; then
+            echo '::error::上游同步失败；如存在合并冲突，请手动解决后重试。未执行强制覆盖。'
+            exit 1
+          fi
+
+          jq -r '.message' "$RUNNER_TEMP/sync-result.json" >> "$GITHUB_STEP_SUMMARY"
