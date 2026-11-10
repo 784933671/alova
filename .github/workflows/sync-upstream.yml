@@ -4,9 +4,18 @@ on:
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'auto：有更新时发布；pack：仅打包；publish：发布当前 main'
+        type: choice
+        default: auto
+        options:
+          - auto
+          - pack
+          - publish
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: sync-upstream-main
@@ -14,16 +23,25 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository == '784933671/alova'
+    if: github.repository == '784933671/alova' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    permissions:
+      contents: write
+    outputs:
+      sha: ${{ steps.merge.outputs.sha }}
+      updated: ${{ steps.merge.outputs.updated }}
     steps:
       - name: Merge upstream main
+        id: merge
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
+
+          branch="repos/${GITHUB_REPOSITORY}/git/ref/heads/main"
+          before=$(gh api "$branch" --jq '.object.sha')
 
           # 原生合并接口保留本仓库提交，冲突时返回失败。
           if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
@@ -33,3 +51,124 @@ jobs:
           fi
 
           jq -r '.message' "$RUNNER_TEMP/sync-result.json" >> "$GITHUB_STEP_SUMMARY"
+          sha=$(gh api "$branch" --jq '.object.sha')
+          updated=false
+          if [[ "$sha" != "$before" ]]; then
+            updated=true
+          fi
+          printf 'sha=%s\nupdated=%s\n' "$sha" "$updated" >> "$GITHUB_OUTPUT"
+
+  pack:
+    needs: sync
+    if: needs.sync.outputs.updated == 'true' || inputs.mode == 'pack' || inputs.mode == 'publish'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUSKY: '0'
+      NPM_TOKEN: ''
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Build packages
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm --filter @alova/shared run build
+          pnpm --filter alova run build
+
+      - name: Pack snapshot
+        env:
+          SOURCE_SHA: ${{ needs.sync.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_dir="$RUNNER_TEMP/npm-packages"
+          mkdir -p "$package_dir"
+
+          # 打包时让 alova 依赖同一提交的 shared 快照。
+          for package in shared alova; do
+            manifest="packages/$package/package.json"
+            jq --arg sha "$SOURCE_SHA" '
+              del(.publishConfig) |
+              .version |= (split("+")[0] |
+                if contains("-") then . + ".upstream.g" + $sha
+                else . + "-upstream.g" + $sha end)
+            ' "$manifest" > "$RUNNER_TEMP/package.json"
+            mv "$RUNNER_TEMP/package.json" "$manifest"
+          done
+
+          for package in shared alova; do
+            pnpm --dir "packages/$package" pack --out "$package_dir/$package.tgz"
+          done
+
+          shared_version=$(jq -er '.version' packages/shared/package.json)
+          tar -xOzf "$package_dir/alova.tgz" package/package.json |
+            jq -e --arg version "$shared_version" '.dependencies["@alova/shared"] == $version' > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm-packages/*.tgz
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  publish:
+    needs: pack
+    if: inputs.mode != 'pack'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions: {}
+    env:
+      NPM_REGISTRY: https://www.ttxli.cn/npm/
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-packages
+          path: ${{ runner.temp }}/npm-packages
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: ${{ env.NPM_REGISTRY }}
+          package-manager-cache: false
+
+      - name: Publish to Verdaccio
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${NODE_AUTH_TOKEN:?请在 GitHub Actions Secrets 中配置 NPM_TOKEN}"
+
+          for package in shared alova; do
+            tarball="$RUNNER_TEMP/npm-packages/$package.tgz"
+            name=alova
+            if [[ "$package" == shared ]]; then
+              name=@alova/shared
+            fi
+            spec=$(tar -xOzf "$tarball" package/package.json |
+              jq -er --arg name "$name" 'select(.name == $name and .publishConfig == null) | .name + "@" + .version')
+
+            # 仅将 404 视为缺少该版本，避免掩盖鉴权或网络错误。
+            if result=$(npm view "$spec" version --json --prefer-online --registry "$NPM_REGISTRY" 2> "$RUNNER_TEMP/npm-view.log"); then
+              printf '%s 已发布，跳过。\n' "$spec"
+              continue
+            fi
+            if ! jq -e '.error.code == "E404"' <<< "$result" > /dev/null; then
+              cat "$RUNNER_TEMP/npm-view.log" >&2
+              exit 1
+            fi
+
+            npm publish "$tarball" --registry "$NPM_REGISTRY" --tag upstream --ignore-scripts
+            printf '已发布 `%s`，标签为 `upstream`。\n\n' "$spec" >> "$GITHUB_STEP_SUMMARY"
+          done
