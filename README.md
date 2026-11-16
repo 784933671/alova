@@ -28,20 +28,22 @@
 Thanks to these generous sponsors for supporting alova's development.
 
 <p align="center">
-  <a href="https://watchthis.dev" target="_blank" rel="noopener noreferrer">
+  <a href="https://www.zeil.com/products/talentseeker" title="ZEIL's hiring tool helping New Zealand employers find and shortlist the right candidates." target="_blank" rel="noopener noreferrer">
+    <img src="https://alova.js.org/img/sponsors/zeil.png" alt="ZEIL TalentSeeker" height="120" />
+  </a>
+</p>
+
+<p align="center">
+  <a href="https://watchthis.dev" title="JavaScript SEO Checker: See What Google Sees" target="_blank" rel="noopener noreferrer">
     <img src="https://alova.js.org/img/sponsors/watchthis-dev-500.png" alt="watchthis.dev" height="80" />
   </a>
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://worma.js.org" target="_blank" rel="noopener noreferrer">
+  <a href="https://worma.js.org" title="Generate type-safe API client code for developers and AI-readable API knowledge for agents. One spec, consistent contracts, faster collaboration." target="_blank" rel="noopener noreferrer">
     <img src="https://worma.js.org/img/logo.svg" alt="worma" height="80" />
   </a>
   &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://sealedrose.com/verify-video" title="Sealed Rose — AI Deepfake Detector" target="_blank" rel="noopener noreferrer">
-    <img src="https://alova.js.org/img/sponsors/mark-pure-white-wax.png" alt="Sealed Rose — AI Deepfake Detector" height="80" />
-  </a>
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://jamfeed.com/tools/instagram-account-analyzer-for-musicians/" title="JamFeed — Instagram Account Analyzer for Musicians" target="_blank" rel="noopener noreferrer">
-    <img src="https://alova.js.org/img/sponsors/jamfeed.png" alt="JamFeed — Instagram Account Analyzer for Musicians" height="80" />
+  <a href="https://jamfeed.com/tools/instagram-account-analyzer-for-musicians/" title="Instagram Account Analyzer for Musicians" target="_blank" rel="noopener noreferrer">
+    <img src="https://alova.js.org/img/sponsors/jamfeed.png" alt="JamFeed" height="80" />
   </a>
 </p>
 
