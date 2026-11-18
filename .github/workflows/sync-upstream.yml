@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'auto：有更新时发布；pack：仅打包；publish：发布当前 main'
+        description: 'auto/publish：同步并补发缺失版本；pack：仅打包'
         type: choice
         default: auto
         options:
@@ -16,6 +16,9 @@ on:
 
 permissions:
   contents: read
+
+env:
+  NPM_REGISTRY: https://www.ttxli.cn/npm/
 
 concurrency:
   group: sync-upstream-main
@@ -30,7 +33,6 @@ jobs:
       contents: write
     outputs:
       sha: ${{ steps.merge.outputs.sha }}
-      updated: ${{ steps.merge.outputs.updated }}
     steps:
       - name: Merge upstream main
         id: merge
@@ -40,9 +42,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          branch="repos/${GITHUB_REPOSITORY}/git/ref/heads/main"
-          before=$(gh api "$branch" --jq '.object.sha')
-
           # 原生合并接口保留本仓库提交，冲突时返回失败。
           if ! gh api --method POST "repos/${GITHUB_REPOSITORY}/merge-upstream" \
             -f branch=main > "$RUNNER_TEMP/sync-result.json"; then
@@ -51,16 +50,75 @@ jobs:
           fi
 
           jq -r '.message' "$RUNNER_TEMP/sync-result.json" >> "$GITHUB_STEP_SUMMARY"
-          sha=$(gh api "$branch" --jq '.object.sha')
-          updated=false
-          if [[ "$sha" != "$before" ]]; then
-            updated=true
+          sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')
+          printf 'sha=%s\n' "$sha" >> "$GITHUB_OUTPUT"
+
+  metadata:
+    needs: sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      spec: ${{ steps.package.outputs.spec }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.sync.outputs.sha }}
+          persist-credentials: false
+
+      - name: Resolve the exact package version
+        id: package
+        env:
+          SOURCE_SHA: ${{ needs.sync.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          spec=$(node scripts/prepare-cm-package.mjs "$SOURCE_SHA" --print-spec)
+          printf 'spec=%s\n' "$spec" >> "$GITHUB_OUTPUT"
+
+  check:
+    needs: metadata
+    if: inputs.mode != 'pack'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      missing: ${{ steps.registry.outputs.missing }}
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: ${{ env.NPM_REGISTRY }}
+          package-manager-cache: false
+
+      - name: Check whether the version needs publishing
+        id: registry
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_SPEC: ${{ needs.metadata.outputs.spec }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${NODE_AUTH_TOKEN:?请在 GitHub Actions Secrets 中配置 NPM_TOKEN}"
+          [[ "$PACKAGE_SPEC" =~ ^@cm/alova-patched@[0-9A-Za-z.-]+$ ]]
+
+          # 私服是发布状态的依据，合并后没有新提交也要检查。
+          if result=$(npm view "$PACKAGE_SPEC" version --json --prefer-online --registry "$NPM_REGISTRY" 2> "$RUNNER_TEMP/npm-view.log"); then
+            jq -e --arg version "${PACKAGE_SPEC##*@}" '. == $version' <<< "$result" > /dev/null
+            printf '`%s` 已发布，跳过打包和发布。\n' "$PACKAGE_SPEC" >> "$GITHUB_STEP_SUMMARY"
+            printf 'missing=false\n' >> "$GITHUB_OUTPUT"
+          elif jq -e '.error.code == "E404"' <<< "$result" > /dev/null; then
+            printf 'missing=true\n' >> "$GITHUB_OUTPUT"
+          else
+            cat "$RUNNER_TEMP/npm-view.log" >&2
+            echo '::error::无法确认私服中的目标版本，已停止打包和发布。'
+            exit 1
           fi
-          printf 'sha=%s\nupdated=%s\n' "$sha" "$updated" >> "$GITHUB_OUTPUT"
 
   pack:
-    needs: sync
-    if: needs.sync.outputs.updated == 'true' || inputs.mode == 'pack' || inputs.mode == 'publish'
+    needs: [sync, metadata, check]
+    if: >-
+      !cancelled() && needs.sync.result == 'success' && needs.metadata.result == 'success' &&
+      (inputs.mode == 'pack' || (needs.check.result == 'success' && needs.check.outputs.missing == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -96,6 +154,7 @@ jobs:
       - name: Pack patched alova
         env:
           SOURCE_SHA: ${{ needs.sync.outputs.sha }}
+          PACKAGE_SPEC: ${{ needs.metadata.outputs.spec }}
         shell: bash
         run: |
           set -euo pipefail
@@ -107,8 +166,8 @@ jobs:
 
           shared_version=$(jq -er '.version' packages/shared/package.json)
           tar -xOzf "$package_dir/alova-patched.tgz" package/package.json |
-            jq -e --arg version "$shared_version" '
-              .name == "@cm/alova-patched" and .dependencies["@alova/shared"] == $version
+            jq -e --arg spec "$PACKAGE_SPEC" --arg version "$shared_version" '
+              (.name + "@" + .version) == $spec and .dependencies["@alova/shared"] == $version
             ' > /dev/null
 
       - uses: actions/upload-artifact@v4
@@ -120,13 +179,11 @@ jobs:
           overwrite: true
 
   publish:
-    needs: pack
-    if: inputs.mode != 'pack'
+    needs: [metadata, check, pack]
+    if: needs.check.outputs.missing == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions: {}
-    env:
-      NPM_REGISTRY: https://www.ttxli.cn/npm/
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -142,6 +199,7 @@ jobs:
       - name: Publish to Verdaccio
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          PACKAGE_SPEC: ${{ needs.metadata.outputs.spec }}
         shell: bash
         run: |
           set -euo pipefail
@@ -150,9 +208,11 @@ jobs:
           tarball="$RUNNER_TEMP/npm-packages/alova-patched.tgz"
           manifest=$(tar -xOzf "$tarball" package/package.json)
           spec=$(jq -er 'select(.name == "@cm/alova-patched" and .publishConfig == null) | .name + "@" + .version' <<< "$manifest")
+          [[ "$spec" == "$PACKAGE_SPEC" ]]
 
           # 仅将 404 视为缺少该版本，避免掩盖鉴权或网络错误。
           if result=$(npm view "$spec" version --json --prefer-online --registry "$NPM_REGISTRY" 2> "$RUNNER_TEMP/npm-view.log"); then
+            jq -e --arg version "${spec##*@}" '. == $version' <<< "$result" > /dev/null
             printf '%s 已发布，跳过。\n' "$spec"
             exit 0
           fi
@@ -164,5 +224,6 @@ jobs:
           shared_version=$(jq -er '.dependencies["@alova/shared"]' <<< "$manifest")
           npm view "@alova/shared@$shared_version" version --json --registry "$NPM_REGISTRY" > /dev/null
           npm publish "$tarball" --registry "$NPM_REGISTRY" --tag cm --access restricted --ignore-scripts
-          npm view "$spec" version --json --prefer-online --registry "$NPM_REGISTRY"
+          npm view '@cm/alova-patched@cm' version --json --prefer-online --registry "$NPM_REGISTRY" |
+            jq -e --arg version "${spec##*@}" '. == $version' > /dev/null
           printf '已发布 `%s`，标签为 `cm`。\n\n' "$spec" >> "$GITHUB_STEP_SUMMARY"

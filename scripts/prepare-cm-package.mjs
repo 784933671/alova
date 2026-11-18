@@ -4,22 +4,30 @@ import { join } from 'node:path';
 const packageDirectory = 'packages/alova';
 const packageName = '@cm/alova-patched';
 const repository = 'https://github.com/784933671/alova';
-const revision = process.argv[2] ?? '';
+const [revision = '', mode] = process.argv.slice(2);
 const moduleReference =
   /(\b(?:from|import)\s*|\b(?:require|import)\s*\(\s*|\bdeclare\s+module\s+)(['"`])alova(\/[\w./-]+)?\2/g;
 const amdDependencies = /\bdefine\s*\(\s*\[[^\]\r\n]*\]/g;
 const amdReference = /(['"`])alova(\/[\w./-]+)?\1/g;
 
-try {
+async function main() {
   if (!/^[a-f0-9]{40}$/.test(revision)) {
     throw new Error('缺少有效的构建提交 SHA');
   }
 
   const manifestPath = join(packageDirectory, 'package.json');
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-  const [upstreamVersion] = manifest.version.split('+');
+  const [upstreamVersion] = (manifest.version ?? '').split('+');
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(upstreamVersion) || /\s/.test(upstreamVersion)) {
+    throw new Error('上游包版本无效');
+  }
   const separator = upstreamVersion.includes('-') ? '.' : '-';
   const version = `${upstreamVersion}${separator}cm.g${revision}`;
+
+  if (mode === '--print-spec') {
+    process.stdout.write(`${packageName}@${version}\n`);
+    return;
+  }
 
   manifest.name = packageName;
   manifest.version = version;
@@ -74,6 +82,10 @@ pnpm add alova@npm:${packageName}@${version}
 
 ${upstreamReadme}`;
   await writeFile(readmePath, readme);
+}
+
+try {
+  await main();
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
   process.exitCode = 1;
